@@ -4,7 +4,7 @@ set -e # 遇到错误立即退出
 # ================= 0. 基础变量配置 =================
 EXP_NAME="cephmango"
 DOMAIN="${EXP_NAME}.isu-cloud.emulab.net"
-NET_IFACE="eno4"   # 请确认这是您的真实网卡名称
+NET_IFACE="eno4"   #请确认这是您的真实网卡名称
 CEPH_VER="quincy"
 REPO_TAG="stable-7.0"
 
@@ -81,7 +81,7 @@ ansible_ssh_private_key_file=~/.ssh/id_rsa
 ansible_ssh_common_args='-o StrictHostKeyChecking=no'
 EOF
 
-## ======================== 7/11: 修改 all.yml 添加 EC 配置 ========================
+# ======================== 7/11: 修改 all.yml 添加 EC 配置 (已修正缩进) ========================
 
 echo ">>> [7/11] 配置全局变量 (all.yml) 并添加 RS(6,4) 纠删码配置..."
 cat > group_vars/all.yml <<EOF
@@ -119,23 +119,17 @@ ceph_conf_overrides:
 # 【新增】RS(K=6, M=4) 纠删码配置
 # ----------------------------------------------------
 ceph_crush_rules:
-  # 定义一个名为 'ec_rule' 的 CRUSH 规则
-  - rule_name: "ec_rule"
-    type: "erasure"
-    # 引用自定义的 profile
-    profile: "rs_6_4_profile"
+  # 列表项的破折号 '-' 和所有键值对均已正确缩进
+  - rule_name: "ec_rule"
+    type: "erasure"
+    profile: "rs_6_4_profile"
 
 ceph_ec_profiles:
-  # 定义一个名为 'rs_6_4_profile' 的 EC Profile
-  - name: "rs_6_4_profile"
-    # 使用 jerasure 插件
-    plugin: "jerasure"
-    # 数据块 K=6
-    k: 6
-    # 编码块 M=4
-    m: 4
-    # 失败域：osd（适用于您每个节点只有一个 OSD 的情况）
-    crush_failure_domain: osd
+  - name: "rs_6_4_profile"
+    plugin: "jerasure"
+    k: 6
+    m: 4
+    crush_failure_domain: osd
 EOF
 
 echo ">>> [8/11] 配置角色变量 (mons, osds, mgrs)..."
@@ -171,7 +165,7 @@ ceph_mgr_dashboard_port: 8443
 ceph_mgr_dashboard_server_addr: "0.0.0.0"
 EOF
 
-## ======================== 9/11: 修改 clients.yml 添加 EC 存储池 ========================
+# ======================== 9/11: 修改 clients.yml 添加 EC 存储池 ========================
 
 echo ">>> [9/11] 配置 Clients (clients.yml) 并创建 rbd-ec 纠删码存储池..."
 cat > group_vars/clients.yml <<EOF
@@ -187,15 +181,15 @@ ceph_pools:
   - name: "rbd-ec"
     pg_num: 128            # EC Pool 推荐使用较大的 PG 数
     pg_autoscale_mode: on
-    rule_name: "ec_rule"   # ⚠️ 使用自定义的 EC Rule
-    type: 3                # ⚠️ type: 3 表示纠删码 (Erasure Code)
+    rule_name: "ec_rule"   # 使用自定义的 EC Rule
+    type: 3                # type: 3 表示纠删码 (Erasure Code)
     application: "rbd"
     # size 字段在 EC 中表示 k+m，即总块数 (6+4=10)
     size: 10
     # min_size 推荐设置为 k，即必须存活的最小块数 (6)
     min_size: 6
   # ----------------------------------------------------
-  # 默认的三副本存储池，可保留或注释掉
+  # 默认的三副本存储池，保留作为复制类型示例
   # ----------------------------------------------------
   - name: "rbd"
     pg_num: 32
@@ -245,6 +239,7 @@ ansible-playbook -i inventory/hosts site.yml -v -e "handler_health_check=false"
 echo "=============================================="
 echo ">>> 部署结束！"
 echo ">>> 正在自动验证集群状态..."
+# 请确保在运行此命令的节点上安装了 ceph-common 包或作为 Ceph Client 配置
 sudo ceph -s
 sudo ceph osd tree
 echo "=============================================="
