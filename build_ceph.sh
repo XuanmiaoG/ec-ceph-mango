@@ -4,7 +4,7 @@ set -e # 遇到错误立即退出
 # ================= 0. 基础变量配置 [cite: 2, 3, 7] =================
 EXP_NAME="cephmango"
 DOMAIN="${EXP_NAME}.isu-cloud.emulab.net"
-NET_IFACE="eno4"   # ⚠️ 请确认这是您的真实网卡名称
+NET_IFACE="eno4"   #  请确认这是您的真实网卡名称
 CEPH_VER="quincy"
 REPO_TAG="stable-7.0"
 
