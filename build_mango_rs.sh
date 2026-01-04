@@ -1,185 +1,198 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # ====================================================
 # 用法:
-#   sudo ./setup.sh server   # Node0: Ceph + MongoDB
-#   sudo ./setup.sh client   # Node1: YCSB
+#   sudo ./mongo_ycsb.sh server rs
+#   sudo ./mongo_ycsb.sh server clay
+#   sudo ./mongo_ycsb.sh server lrc
+#   sudo ./mongo_ycsb.sh client
+#
+# 说明:
+# - 本脚本不创建/修改 Ceph pools、profiles、RBD image
+# - 假设你已经用“今天的脚本”在 node0 上完成：
+#     /mnt/xfs_rs   (XFS on RBD on EC pool_rs)
+#     /mnt/xfs_clay (XFS on RBD on EC pool_clay)
+#     /mnt/xfs_lrc  (XFS on RBD on EC pool_lrc)
+# - 本脚本只负责把 MongoDB data directory 放到对应 mount 上
 # ====================================================
 
-MODE=$1
+MODE="${1:-}"
+SCHEME="${2:-}"   # only for server: rs|clay|lrc
 
-# ================= 基础配置 =================
-# EC data pool
-EC_POOL_NAME="rbd-ec-53"
+# MongoDB data directory (system default)
+MONGO_DATA_DIR="/var/lib/mongodb"
 
-# Replicated metadata pool
-REP_POOL_NAME="rbd-rep-3"
+# Mount roots from today's setup
+MNT_RS="/mnt/xfs_rs"
+MNT_CLAY="/mnt/xfs_clay"
+MNT_LRC="/mnt/xfs_lrc"
 
-IMAGE_NAME="mongo-disk-500g"
-IMAGE_SIZE="512000"   # MB (~500GB)
-MOUNT_POINT="/var/lib/mongodb"
+# Subdir inside mount for MongoDB data
+SUBDIR_NAME="mongodb"
 
-# EC 参数 (RS 5+3)
-EC_PROFILE="ec_5_3_profile"
-EC_K=5
-EC_M=3
-
-# Replication 参数
-REP_SIZE=3
-REP_MIN_SIZE=2
-
-# ================= 帮助 =================
 usage() {
-    echo "用法: sudo ./setup.sh [server|client]"
+  echo "用法:"
+  echo "  sudo $0 server [rs|clay|lrc]"
+  echo "  sudo $0 client"
+  exit 1
+}
+
+require_root() {
+  if [[ "$(id -u)" -ne 0 ]]; then
+    echo "请用 root 运行: sudo $0 ..."
     exit 1
+  fi
 }
 
-[ -z "$MODE" ] && usage
+pick_backend_path() {
+  case "$SCHEME" in
+    rs)   echo "${MNT_RS}/${SUBDIR_NAME}" ;;
+    clay) echo "${MNT_CLAY}/${SUBDIR_NAME}" ;;
+    lrc)  echo "${MNT_LRC}/${SUBDIR_NAME}" ;;
+    *)    echo "" ;;
+  esac
+}
 
-# ================= Server (Node0) =================
-install_server() {
-    echo ">>> [Server] Dual-pool RBD (Replicated metadata + EC data)"
+ensure_mount_ready() {
+  local base="$1"  # e.g., /mnt/xfs_rs
+  if [[ -z "$base" ]]; then
+    echo "ERROR: mount base path is empty"
+    exit 1
+  fi
+  if [[ ! -d "$base" ]]; then
+    echo "ERROR: $base 不存在。你需要先完成今天的 RBD+XFS+mount 脚本。"
+    exit 1
+  fi
+  if ! mountpoint -q "$base"; then
+    echo "ERROR: $base 不是 mountpoint（没挂载成功）。请先 mount 好再跑。"
+    exit 1
+  fi
+}
 
-    EC_SUCCESS=true
+install_mongodb_6() {
+  echo ">>> 安装 MongoDB 6.0 (Ubuntu jammy repo)..."
+  if command -v mongod &>/dev/null; then
+    echo " - mongod 已存在，跳过安装"
+    return 0
+  fi
 
-    # ------------------------------------------------
-    # [1/6] 创建 EC Pool
-    # ------------------------------------------------
-    echo ">>> [1/6] 创建 EC Pool (RS ${EC_K}+${EC_M})"
+  apt-get update
+  apt-get install -y curl gnupg ca-certificates
 
-    if ! ceph osd erasure-code-profile ls | grep -q "^${EC_PROFILE}$"; then
-        ceph osd erasure-code-profile set \
-            ${EC_PROFILE} k=${EC_K} m=${EC_M} --force || EC_SUCCESS=false
-    fi
+  curl -fsSL https://pgp.mongodb.com/server-6.0.asc \
+    | gpg --dearmor -o /usr/share/keyrings/mongodb-server-6.0.gpg
 
-    if [ "$EC_SUCCESS" = true ]; then
-        if ! ceph osd pool ls | grep -q "^${EC_POOL_NAME}$"; then
-            ceph osd pool create ${EC_POOL_NAME} erasure ${EC_PROFILE} || EC_SUCCESS=false
-        fi
-    fi
-
-    if [ "$EC_SUCCESS" = true ]; then
-        ceph osd pool set ${EC_POOL_NAME} allow_ec_overwrites true || EC_SUCCESS=false
-    fi
-
-    # ------------------------------------------------
-    # [2/6] 创建 replicated metadata pool
-    # ------------------------------------------------
-    echo ">>> [2/6] 创建 Replicated metadata pool"
-
-    if ! ceph osd pool ls | grep -q "^${REP_POOL_NAME}$"; then
-        ceph osd pool create ${REP_POOL_NAME}
-        ceph osd pool set ${REP_POOL_NAME} size ${REP_SIZE}
-        ceph osd pool set ${REP_POOL_NAME} min_size ${REP_MIN_SIZE}
-    fi
-
-    # ------------------------------------------------
-    # [3/6] Pool 初始化
-    # ------------------------------------------------
-    echo ">>> [3/6] 初始化 pools"
-
-    for p in ${REP_POOL_NAME} ${EC_POOL_NAME}; do
-        ceph osd pool application enable $p rbd || true
-        ceph osd pool set $p pg_autoscale_mode on || true
-    done
-
-    rbd pool init ${REP_POOL_NAME} || true
-
-    if [ "$EC_SUCCESS" = true ]; then
-        echo "✅ Dual-pool RBD 已启用"
-        echo "   metadata pool : ${REP_POOL_NAME}"
-        echo "   data pool     : ${EC_POOL_NAME}"
-    else
-        echo "⚠️ EC 不可用，仅使用 replication pool"
-    fi
-
-    # ------------------------------------------------
-    # [4/6] 创建 RBD 镜像（dual-pool）
-    # ------------------------------------------------
-    echo ">>> [4/6] 创建 RBD 镜像"
-
-    if ! rbd info ${REP_POOL_NAME}/${IMAGE_NAME} &>/dev/null; then
-        if [ "$EC_SUCCESS" = true ]; then
-            rbd create ${IMAGE_NAME} \
-                --size ${IMAGE_SIZE} \
-                --pool ${REP_POOL_NAME} \
-                --data-pool ${EC_POOL_NAME}
-        else
-            rbd create ${IMAGE_NAME} \
-                --size ${IMAGE_SIZE} \
-                --pool ${REP_POOL_NAME}
-        fi
-    fi
-
-    # ------------------------------------------------
-    # [5/6] 映射 / 格式化 / 挂载
-    # ------------------------------------------------
-    echo ">>> [5/6] 映射 / 格式化 / 挂载"
-
-    if ! rbd showmapped | grep -q "${REP_POOL_NAME}/${IMAGE_NAME}"; then
-        rbd map ${REP_POOL_NAME}/${IMAGE_NAME}
-    fi
-
-    RBD_DEV=$(rbd showmapped | grep "${IMAGE_NAME}" | awk '{print $5}')
-
-    if ! blkid ${RBD_DEV} | grep -q xfs; then
-        mkfs.xfs -f ${RBD_DEV}
-    fi
-
-    systemctl stop mongod 2>/dev/null || true
-    mkdir -p ${MOUNT_POINT}
-
-    mount | grep -q "${MOUNT_POINT}" || mount ${RBD_DEV} ${MOUNT_POINT}
-
-    if ! grep -q "${RBD_DEV}" /etc/fstab; then
-        echo "${RBD_DEV} ${MOUNT_POINT} xfs defaults,_netdev 0 0" >> /etc/fstab
-    fi
-
-    # ------------------------------------------------
-    # [6/6] 安装 MongoDB 6.0（Jammy 官方支持）
-    # ------------------------------------------------
-    echo ">>> [6/6] 安装 MongoDB 6.0"
-
-    if ! command -v mongod &>/dev/null; then
-        curl -fsSL https://pgp.mongodb.com/server-6.0.asc \
-            | gpg --dearmor -o /usr/share/keyrings/mongodb-server-6.0.gpg
-
-        echo "deb [ arch=amd64 signed-by=/usr/share/keyrings/mongodb-server-6.0.gpg ] \
+  echo "deb [ arch=amd64 signed-by=/usr/share/keyrings/mongodb-server-6.0.gpg ] \
 https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/6.0 multiverse" \
-            > /etc/apt/sources.list.d/mongodb-org-6.0.list
+    > /etc/apt/sources.list.d/mongodb-org-6.0.list
 
-        apt update
-        apt install -y mongodb-org
+  apt-get update
+  apt-get install -y mongodb-org
+}
+
+configure_mongodb_bindip() {
+  # 允许远程连接（YCSB 从 node1 打进来）
+  if grep -q '^[[:space:]]*bindIp:' /etc/mongod.conf; then
+    sed -i 's/^[[:space:]]*bindIp:.*/  bindIp: 0.0.0.0/' /etc/mongod.conf
+  else
+    # mongod.conf 格式一般含 net:，这里简单追加最小配置
+    cat >> /etc/mongod.conf <<'EOF'
+
+net:
+  bindIp: 0.0.0.0
+EOF
+  fi
+}
+
+switch_mongo_datadir_to_backend() {
+  local backend_dir="$1"  # e.g., /mnt/xfs_lrc/mongodb
+
+  echo ">>> 切换 MongoDB 数据目录到: $backend_dir"
+  systemctl stop mongod 2>/dev/null || true
+
+  # 准备目标目录
+  mkdir -p "$backend_dir"
+
+  # 如果 /var/lib/mongodb 不是 symlink，且里面有数据，迁移一次
+  if [[ -d "$MONGO_DATA_DIR" && ! -L "$MONGO_DATA_DIR" ]]; then
+    if [[ "$(ls -A "$MONGO_DATA_DIR" 2>/dev/null || true)" != "" ]]; then
+      echo " - 检测到 $MONGO_DATA_DIR 有旧数据，迁移到 $backend_dir ..."
+      rsync -aHAX --delete "$MONGO_DATA_DIR/" "$backend_dir/"
+    fi
+  fi
+
+  # 重新建立 symlink：/var/lib/mongodb -> backend_dir
+  rm -rf "$MONGO_DATA_DIR"
+  ln -s "$backend_dir" "$MONGO_DATA_DIR"
+
+  # 权限
+  chown -R mongodb:mongodb "$backend_dir"
+
+  # 确保 mongod 配置中 dbPath 指向 /var/lib/mongodb（默认即可）
+  # 如果你曾改过 dbPath，这里强制纠正为 /var/lib/mongodb
+  if grep -q '^[[:space:]]*dbPath:' /etc/mongod.conf; then
+    sed -i "s|^[[:space:]]*dbPath:.*|  dbPath: ${MONGO_DATA_DIR}|" /etc/mongod.conf
+  fi
+
+  systemctl daemon-reload
+  systemctl enable mongod
+  systemctl restart mongod
+}
+
+install_ycsb_client() {
+  echo ">>> [Client] 安装 YCSB (mongodb binding)..."
+  apt-get update
+  apt-get install -y default-jdk maven git python3 python-is-python3
+
+  if [[ ! -d YCSB ]]; then
+    git clone https://github.com/brianfrankcooper/YCSB.git
+  fi
+  cd YCSB
+  mvn -pl mongodb -am clean package -DskipTests
+
+  echo ">>> [Client] 完成"
+}
+
+########################################
+# 主入口
+########################################
+require_root
+
+case "$MODE" in
+  server)
+    if [[ -z "$SCHEME" ]]; then
+      echo "ERROR: server 模式必须指定 rs|clay|lrc"
+      usage
     fi
 
-    chown -R mongodb:mongodb ${MOUNT_POINT}
-    sed -i 's/^ *bindIp:.*/bindIp: 0.0.0.0/' /etc/mongod.conf
+    backend_dir="$(pick_backend_path)"
+    if [[ -z "$backend_dir" ]]; then
+      echo "ERROR: scheme 只能是 rs|clay|lrc"
+      usage
+    fi
 
-    systemctl daemon-reload
-    systemctl restart mongod
-    systemctl enable mongod
+    # 确认对应 mount 已经存在且已挂载
+    case "$SCHEME" in
+      rs)   ensure_mount_ready "$MNT_RS" ;;
+      clay) ensure_mount_ready "$MNT_CLAY" ;;
+      lrc)  ensure_mount_ready "$MNT_LRC" ;;
+    esac
 
+    install_mongodb_6
+    configure_mongodb_bindip
+    switch_mongo_datadir_to_backend "$backend_dir"
+
+    echo "=============================================="
     echo ">>> [Server] 完成"
-}
-
-# ================= Client (Node1) =================
-install_client() {
-    echo ">>> [Client] 安装 YCSB"
-
-    apt update
-    apt install -y default-jdk maven git python3 python-is-python3
-
-    [ -d YCSB ] || git clone https://github.com/brianfrankcooper/YCSB.git
-    cd YCSB
-    mvn -pl mongodb -am clean package -DskipTests
-
-    echo ">>> [Client] 完成"
-}
-
-# ================= 主入口 =================
-case "$MODE" in
-    server) install_server ;;
-    client) install_client ;;
-    *) usage ;;
+    echo "MongoDB 6 data dir -> $MONGO_DATA_DIR -> $backend_dir"
+    echo "你可以在 node1 用 YCSB 连接 node0:27017"
+    echo "=============================================="
+    ;;
+  client)
+    install_ycsb_client
+    ;;
+  *)
+    usage
+    ;;
 esac
