@@ -9,11 +9,7 @@ CEPH_VER="reef"
 REPO_TAG="stable-8.0"
 
 echo ">>> [1/11] 环境检查: 测试外网连接..."
-if ping -c 2 galaxy.ansible.com > /dev/null 2>&1; then
-    echo "Network OK."
-else
-    echo "警告: 无法连接到 galaxy.ansible.com，依赖下载可能会失败。"
-fi
+ping -c 2 galaxy.ansible.com > /dev/null 2>&1 || echo "警告: 无法连接到 galaxy.ansible.com"
 
 echo ">>> [2/11] 安装系统基础依赖..."
 sudo apt update
@@ -27,7 +23,6 @@ fi
 cd ceph-ansible
 git fetch --all
 git checkout $REPO_TAG
-echo "当前分支: $(git branch --show-current)"
 
 echo ">>> [4/11] 安装 Python 依赖和 Ansible Collections..."
 pip3 install -r requirements.txt
@@ -69,7 +64,7 @@ done
 cat >> inventory/hosts <<EOF
 
 [clients]
-# node0 是本地管理节点
+# node0 作为管理端和第一个 Client
 node0.${DOMAIN} ansible_host=10.10.1.1 ansible_connection=local
 node1.${DOMAIN} ansible_host=10.10.1.2
 
@@ -90,7 +85,7 @@ ansible_ssh_private_key_file=~/.ssh/id_rsa
 ansible_ssh_common_args='-o StrictHostKeyChecking=no'
 EOF
 
-echo ">>> [7/11] 配置全局变量 (all.yml)..."
+echo ">>> [7/11] 配置全局变量 (all.yml) - 包含强制修复..."
 cat > group_vars/all.yml <<EOF
 ---
 ceph_origin: repository
@@ -114,13 +109,12 @@ ansible_ssh_user: root
 ansible_become: true
 gather_facts: true
 
-# 【关键修复】跳过 Ceph-Ansible 官方部署工具变动的拦截警告
+# 【终极修复】必须在变量文件中显式声明确认，跳过 cephadm 迁移警告
 ceph_ansible_disclaimer: true
 
-# 【关键修复】禁用 Handler 健康检查，防止部署时死锁
+# 禁用 Handler 健康检查，防止首次部署因 OSD 未就绪导致死锁
 handler_health_check: false
 
-# 全局开启 PG 自动伸缩
 ceph_conf_overrides:
   global:
     osd_pool_default_pg_autoscale_mode: on
@@ -145,7 +139,7 @@ devices:
   - /dev/sdb
 EOF
 
-# Mgrs
+# Mgrs/MDSs
 cat > group_vars/mgrs.yml <<EOF
 ---
 ceph_mgr_modules: [dashboard, prometheus, iostat, restful]
@@ -153,13 +147,11 @@ ceph_mgr_dashboard_port: 8443
 ceph_mgr_dashboard_server_addr: "0.0.0.0"
 EOF
 
-# MDSs
 cat > group_vars/mdss.yml <<EOF
 ---
-# 基础配置
 EOF
 
-echo ">>> [9/11] 配置 Clients (clients.yml)..."
+echo ">>> [9/11] 配置 Clients (设置 Pool 副本数为 3)..."
 cat > group_vars/clients.yml <<EOF
 ---
 copy_admin_key: true
@@ -177,10 +169,10 @@ echo ">>> [10/11] 最终预检 (Ping)..."
 ansible -i inventory/hosts all -m ping
 
 echo ">>> [11/11] 开始部署 Ceph Reef..."
-# 使用 -e 再次确保免责确认生效
+# 同时在变量文件和命令行中双重保险
 ansible-playbook -i inventory/hosts site.yml -v \
-  -e "handler_health_check=false" \
-  -e "ceph_ansible_disclaimer=true"
+  -e "ceph_ansible_disclaimer=true" \
+  -e "handler_health_check=false"
 
 echo "=============================================="
 echo ">>> 部署结束！"
