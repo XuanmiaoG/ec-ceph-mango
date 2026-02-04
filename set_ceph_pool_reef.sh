@@ -186,6 +186,8 @@ echo " - mapped $META_POOL/$IMG_CLAY -> $DEV_CLAY"
 echo " - mapped $META_POOL/$IMG_LRC  -> $DEV_LRC"
 echo " - mapped $POOL_REP/$IMG_REP   -> $DEV_REP"
 
+sudo apt-get update
+sudo apt-get install xfsprogs
 # mkfs XFS (实验环境强制重建)
 mkfs.xfs -f "$DEV_RS"
 mkfs.xfs -f "$DEV_CLAY"

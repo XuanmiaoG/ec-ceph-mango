@@ -4,21 +4,26 @@ set -euo pipefail
 # ====================================================
 # 用法:
 #   sudo ./mongo_ycsb.sh server rep
+# sudo ./mango.sh server rep
 #   sudo ./mongo_ycsb.sh server rs
 #   sudo ./mongo_ycsb.sh server clay
 #   sudo ./mongo_ycsb.sh server lrc
-#   sudo ./mongo_ycsb.sh client
+#   ./mongo_ycsb.sh client
 #
 # 说明:
 # - 本脚本不创建/修改 Ceph pools、profiles、RBD image
 # - 假设你已经在 node0 上完成：
-#     /mnt/xfs_rep   (XFS on RBD, replicated pool)
-#     /mnt/xfs_rs    (XFS on RBD on EC pool_rs)
-#     /mnt/xfs_clay  (XFS on RBD on EC pool_clay)
-#     /mnt/xfs_lrc   (XFS on RBD on EC pool_lrc)
-# - 本脚本只负责：
-#     1) 安装 MongoDB / YCSB
-#     2) 切换 MongoDB data directory 到指定 backend
+#     /mnt/xfs_rep
+#     /mnt/xfs_rs
+#     /mnt/xfs_clay
+#     /mnt/xfs_lrc
+# - Server:
+#     - 安装 MongoDB 6.0
+#     - 切换 MongoDB 数据目录到指定 backend
+# - Client:
+#     - 安装 Java
+#     - 下载【官方 YCSB binary release】
+#     - 不编译、不修改源码
 # ====================================================
 
 MODE="${1:-}"
@@ -31,11 +36,19 @@ SCHEME="${2:-}"   # server 模式下：rep|rs|clay|lrc
 MONGO_DATA_DIR="/var/lib/mongodb"
 SUBDIR_NAME="mongodb"
 
-# Mount points
 MNT_REP="/mnt/xfs_rep"
 MNT_RS="/mnt/xfs_rs"
 MNT_CLAY="/mnt/xfs_clay"
 MNT_LRC="/mnt/xfs_lrc"
+
+########################################
+# YCSB
+########################################
+
+YCSB_VERSION="0.17.0"
+YCSB_TARBALL="ycsb-${YCSB_VERSION}.tar.gz"
+YCSB_URL="https://github.com/brianfrankcooper/YCSB/releases/download/0.17.0/ycsb-0.17.0.tar.gz"
+YCSB_INSTALL_DIR="/opt/ycsb"
 
 ########################################
 # Utils
@@ -44,13 +57,13 @@ MNT_LRC="/mnt/xfs_lrc"
 usage() {
   echo "用法:"
   echo "  sudo $0 server [rep|rs|clay|lrc]"
-  echo "  sudo $0 client"
+  echo "  $0 client"
   exit 1
 }
 
-require_root() {
-  if [[ "$(id -u)" -ne 0 ]]; then
-    echo "ERROR: 请用 root 运行: sudo $0 ..."
+require_root_server() {
+  if [[ "$MODE" == "server" && "$(id -u)" -ne 0 ]]; then
+    echo "ERROR: server 模式请用 root 运行"
     exit 1
   fi
 }
@@ -67,16 +80,12 @@ pick_backend_path() {
 
 ensure_mount_ready() {
   local base="$1"
-  if [[ -z "$base" ]]; then
-    echo "ERROR: mount base path is empty"
-    exit 1
-  fi
   if [[ ! -d "$base" ]]; then
-    echo "ERROR: $base 不存在，请先完成 RBD + XFS + mount"
+    echo "ERROR: $base 不存在"
     exit 1
   fi
   if ! mountpoint -q "$base"; then
-    echo "ERROR: $base 不是 mountpoint（尚未挂载）"
+    echo "ERROR: $base 不是 mountpoint"
     exit 1
   fi
 }
@@ -86,12 +95,12 @@ ensure_mount_ready() {
 ########################################
 
 install_mongodb_6() {
-  echo ">>> 安装 MongoDB 6.0 (Ubuntu 22.04 / jammy)..."
   if command -v mongod &>/dev/null; then
-    echo " - mongod 已存在，跳过安装"
+    echo ">>> MongoDB 已安装，跳过"
     return
   fi
 
+  echo ">>> 安装 MongoDB 6.0 (Ubuntu 24.04)"
   apt-get update
   apt-get install -y curl gnupg ca-certificates
 
@@ -107,11 +116,11 @@ https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/6.0 multiverse" \
 }
 
 configure_mongodb_bindip() {
-  echo ">>> 配置 MongoDB 允许远程访问 (bindIp=0.0.0.0)"
-  if grep -q '^[[:space:]]*bindIp:' /etc/mongod.conf; then
+  echo ">>> 配置 MongoDB bindIp=0.0.0.0"
+  if grep -q 'bindIp:' /etc/mongod.conf; then
     sed -i 's/^[[:space:]]*bindIp:.*/  bindIp: 0.0.0.0/' /etc/mongod.conf
   else
-    cat >> /etc/mongod.conf <<'EOF'
+    cat >> /etc/mongod.conf <<EOF
 
 net:
   bindIp: 0.0.0.0
@@ -122,28 +131,22 @@ EOF
 switch_mongo_datadir() {
   local backend_dir="$1"
 
-  echo ">>> 切换 MongoDB 数据目录到: $backend_dir"
+  echo ">>> MongoDB 数据目录 -> $backend_dir"
+  systemctl stop mongod || true
 
-  systemctl stop mongod 2>/dev/null || true
   mkdir -p "$backend_dir"
 
-  # 如果原来有数据，迁移一次
   if [[ -d "$MONGO_DATA_DIR" && ! -L "$MONGO_DATA_DIR" ]]; then
-    if [[ "$(ls -A "$MONGO_DATA_DIR" 2>/dev/null || true)" != "" ]]; then
-      echo " - 迁移旧数据到 $backend_dir"
-      rsync -aHAX --delete "$MONGO_DATA_DIR/" "$backend_dir/"
+    if [[ "$(ls -A "$MONGO_DATA_DIR" 2>/dev/null)" != "" ]]; then
+      rsync -aHAX "$MONGO_DATA_DIR/" "$backend_dir/"
     fi
   fi
 
   rm -rf "$MONGO_DATA_DIR"
   ln -s "$backend_dir" "$MONGO_DATA_DIR"
-
   chown -R mongodb:mongodb "$backend_dir"
 
-  # 强制 dbPath 正确
-  if grep -q '^[[:space:]]*dbPath:' /etc/mongod.conf; then
-    sed -i "s|^[[:space:]]*dbPath:.*|  dbPath: ${MONGO_DATA_DIR}|" /etc/mongod.conf
-  fi
+  sed -i "s|^[[:space:]]*dbPath:.*|  dbPath: ${MONGO_DATA_DIR}|" /etc/mongod.conf || true
 
   systemctl daemon-reload
   systemctl enable mongod
@@ -151,30 +154,40 @@ switch_mongo_datadir() {
 }
 
 ########################################
-# YCSB client install
+# YCSB client (OFFICIAL RELEASE)
 ########################################
 
 install_ycsb_client() {
-  echo ">>> [Client] 安装 YCSB (MongoDB binding)..."
+  echo ">>> [Client] 安装 YCSB 官方发行包 (${YCSB_VERSION})"
 
-  apt-get update
-  apt-get install -y default-jdk maven git python3 python-is-python3
+  sudo apt-get update
+  sudo apt-get install -y openjdk-17-jre-headless curl tar
 
-  if [[ ! -d YCSB ]]; then
-    git clone https://github.com/brianfrankcooper/YCSB.git
+  if [[ -d "${YCSB_INSTALL_DIR}/ycsb-${YCSB_VERSION}" ]]; then
+    echo ">>> YCSB 已存在，跳过下载"
+    return
   fi
 
-  cd YCSB
-  mvn -pl mongodb -am clean package -DskipTests
+  sudo mkdir -p "$YCSB_INSTALL_DIR"
+  cd /tmp
 
-  echo ">>> [Client] YCSB 安装完成"
+  curl -LO "$YCSB_URL"
+  sudo tar -xzf "$YCSB_TARBALL" -C "$YCSB_INSTALL_DIR"
+
+  sudo ln -sf \
+    "${YCSB_INSTALL_DIR}/ycsb-${YCSB_VERSION}/bin/ycsb" \
+    /usr/local/bin/ycsb
+
+  echo ">>> YCSB 安装完成:"
+  echo "    $(which ycsb)"
+  echo "    ycsb --version"
 }
 
 ########################################
 # Main
 ########################################
 
-require_root
+require_root_server
 
 case "$MODE" in
   server)
@@ -194,12 +207,7 @@ case "$MODE" in
     configure_mongodb_bindip
     switch_mongo_datadir "$backend_dir"
 
-    echo "=============================================="
-    echo ">>> [Server] 完成"
-    echo "Backend : $SCHEME"
-    echo "MongoDB : /var/lib/mongodb -> $backend_dir"
-    echo "Listen  : 0.0.0.0:27017"
-    echo "=============================================="
+    echo ">>> [Server] 完成 ($SCHEME)"
     ;;
   client)
     install_ycsb_client
