@@ -2,7 +2,7 @@
 set -e
 
 # ================= 0. 基础变量配置 =================
-EXP_NAME="cephmango"
+EXP_NAME="cephai"
 DOMAIN="${EXP_NAME}.isu-cloud.emulab.net"
 BOOTSTRAP_IP="10.10.1.1"
 
