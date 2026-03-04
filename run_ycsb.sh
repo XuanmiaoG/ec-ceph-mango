@@ -63,7 +63,8 @@ echo ">>> Log file: $LOG_FILE"
   -threads "$THREADS" \
   2>&1 | tee "$LOG_FILE"
 
-# 3. 数据清洗 (解析 Throughput, Read Latency, Update Latency)
+# 3. 数据清洗
+# 3.1 提取时间序列数据 (解析 Throughput, Read Latency, Update Latency)
 echo ">>> [3/3] Parsing logs to CSV ($CSV_FILE)..."
 
 echo "Time_Sec,Throughput_Ops_Sec,Read_Lat_ms,Update_Lat_ms" > "$CSV_FILE"
@@ -81,11 +82,13 @@ awk '
     # 2) READ Avg
     n = split($0, partsR, "READ:");
     if (n > 1) {
-        split(partsR[2], statsR, ",");
+        split(partsR[2], subPartsR, "]");
+        split(subPartsR[1], statsR, ",");
         for(k in statsR) {
             if (statsR[k] ~ /Avg=/) {
                 split(statsR[k], v, "=");
                 read_lat = v[2] / 1000.0;  # YCSB 一般是 us，转 ms
+                break;
             }
         }
     }
@@ -93,11 +96,13 @@ awk '
     # 3) UPDATE Avg
     n = split($0, partsU, "UPDATE:");
     if (n > 1) {
-        split(partsU[2], statsU, ",");
+        split(partsU[2], subPartsU, "]");
+        split(subPartsU[1], statsU, ",");
         for(k in statsU) {
             if (statsU[k] ~ /Avg=/) {
                 split(statsU[k], v, "=");
                 update_lat = v[2] / 1000.0;
+                break;
             }
         }
     }
@@ -108,6 +113,14 @@ awk '
     }
 }' "$LOG_FILE" >> "$CSV_FILE"
 
-echo ">>> Done! Data saved to $CSV_FILE"
+# 3.2 提取最终汇总直方图 (Summary)
+SUMMARY_FILE="/root/result_rs_summary.txt"
+echo ">>> Extracting final summary to $SUMMARY_FILE..."
+# YCSB 跑完后会在末尾输出类似 [OVERALL], [READ], [UPDATE] 的汇总统计，我们把它截取出来
+grep -E '^\[(OVERALL|READ|UPDATE|CLEANUP|INSERT)\]' "$LOG_FILE" > "$SUMMARY_FILE"
+
+echo ">>> Done!"
+echo ">>> Time-series CSV saved to: $CSV_FILE"
+echo ">>> Final summary saved to:   $SUMMARY_FILE"
 echo ">>> Head of CSV data:"
 head -n 5 "$CSV_FILE"
