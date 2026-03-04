@@ -3,12 +3,13 @@ set -euo pipefail
 
 # ====================================================
 # 用法:
-#   sudo ./mongo_ycsb.sh server rep
-# sudo ./mango.sh server rep
-#   sudo ./mongo_ycsb.sh server rs
-#   sudo ./mongo_ycsb.sh server clay
-#   sudo ./mongo_ycsb.sh server lrc
-#   ./mongo_ycsb.sh client
+#   sudo ./mango.sh server rep
+#   sudo ./mango.sh server rs
+
+#   sudo ./mango.sh server clay
+
+#   sudo ./mango.sh server lrc
+#   sudo ./mango.sh client
 #
 # 说明:
 # - 本脚本不创建/修改 Ceph pools、profiles、RBD image

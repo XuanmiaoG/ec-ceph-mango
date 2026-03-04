@@ -7,11 +7,12 @@ YCSB_HOME="/opt/ycsb/ycsb-0.17.0"
 YCSB_BIN="${YCSB_HOME}/bin/ycsb.sh"
 
 DB_TYPE="mongodb"
-WORKLOAD="${YCSB_HOME}/workloads/workloada"
+WORKLOAD="${YCSB_HOME}/workloads/workload_ceph_read"
+#WORKLOAD="${YCSB_HOME}/workloads/workloada"
 DB_URL="mongodb://10.10.1.1:27017/ycsb?w=1"
 
 # 数据量配置
-RECORD_COUNT=100000       # 数据库里的总行数
+RECORD_COUNT=5000000      # 数据库里的总行数
 OPERATION_COUNT=100000000 # 巨大数值，保证跑满时间
 THREADS=8
 
@@ -20,7 +21,7 @@ RUN_TIME_SEC=1200
 
 # 输出文件（写到 root 当前目录，也可以改成固定目录）
 LOG_FILE="/root/ycsb_run.log"
-CSV_FILE="/root/ycsb_result_repout.csv"
+CSV_FILE="/root/result_rs_out1.csv"
 # ===========================================
 
 echo ">>> YCSB_BIN   : $YCSB_BIN"
