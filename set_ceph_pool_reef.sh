@@ -153,23 +153,23 @@ echo ">>> [8/9] 创建 RBD images：EC 三张（metadata=$META_POOL, data-pool=E
 
 # EC-backed images (metadata in META_POOL, data in EC pool)
 sudo cephadm shell -- rbd create "$META_POOL/$IMG_RS" \
-  --size 100G \
+  --size 1024G \
   --image-feature layering \
   --data-pool "$POOL_RS"
 
 sudo cephadm shell -- rbd create "$META_POOL/$IMG_CLAY" \
-  --size 100G \
+  --size 1024G \
   --image-feature layering \
   --data-pool "$POOL_CLAY"
 
 sudo cephadm shell -- rbd create "$META_POOL/$IMG_LRC" \
-  --size 100G \
+  --size 1024G \
   --image-feature layering \
   --data-pool "$POOL_LRC"
 
 # Replicated baseline image (data also in POOL_REP)
 sudo cephadm shell -- rbd create "$POOL_REP/$IMG_REP" \
-  --size 100G \
+  --size 1024G \
   --image-feature layering
 
 ########################################
